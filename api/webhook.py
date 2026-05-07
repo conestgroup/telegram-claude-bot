@@ -13,7 +13,7 @@ def send_message(chat_id, text):
 def ask_claude(user_message):
     url = "https://api.anthropic.com/v1/messages"
     payload = {
-        "model": "claude-opus-4-5",
+        "model": "claude-haiku-4-5-20251001",
         "max_tokens": 512,
         "messages": [{"role": "user", "content": user_message}]
     }
@@ -23,7 +23,7 @@ def ask_claude(user_message):
         "x-api-key": ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01"
     })
-    resp = urllib.request.urlopen(req, timeout=25)
+    resp = urllib.request.urlopen(req, timeout=20)
     result = json.loads(resp.read())
     return result["content"][0]["text"]
 
@@ -39,8 +39,6 @@ class handler(BaseHTTPRequestHandler):
             if chat_id and text:
                 if text == "/start":
                     reply = "Привет! Я Claude AI. Пиши мне что угодно — отвечу!"
-                elif not ANTHROPIC_KEY:
-                    reply = "Ошибка: ANTHROPIC_API_KEY не задан"
                 else:
                     reply = ask_claude(text)
                 send_message(chat_id, reply)
@@ -48,14 +46,13 @@ class handler(BaseHTTPRequestHandler):
             err = e.read().decode()
             print(f"HTTP Error: {e.code} - {err}")
             if chat_id:
-                send_message(chat_id, f"Ошибка API: {e.code} - {err[:100]}")
+                try: send_message(chat_id, f"Ошибка API {e.code}: {err[:150]}")
+                except: pass
         except Exception as e:
             print(f"Error: {type(e).__name__}: {e}")
             if chat_id:
-                try:
-                    send_message(chat_id, f"Ошибка: {type(e).__name__}: {str(e)[:100]}")
-                except:
-                    pass
+                try: send_message(chat_id, f"Ошибка: {str(e)[:150]}")
+                except: pass
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
