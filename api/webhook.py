@@ -99,9 +99,9 @@ Respond in the same language the user writes in. Be direct and concise.
 - Use the brain content to give personalized answers
 - If the user says "remember X" or "запомни X" — confirm you will save it
 - If the user shares important info, decisions, or tasks — note them
-- After responding, if something important was said, add a JSON block at the very end:
-  <SAVE>{"section": "Tasks & Follow-ups", "content": "- Task description"}</SAVE>
-  Valid sections: "Important Decisions", "Tasks & Follow-ups", "Conversation Memory"
+- After responding, if something important was said, add a block at the very end:
+  <SAVE>section:Tasks & Follow-ups|content:- Task description here</SAVE>
+  Valid sections: Important Decisions, Tasks & Follow-ups, Conversation Memory
 """
 
     if chat_id not in conversations:
@@ -137,19 +137,24 @@ def process_save(reply, brain_content, brain_sha):
     clean_reply = re.sub(r'<SAVE>.*?</SAVE>', '', reply, flags=re.DOTALL).strip()
     
     new_brain = brain_content
-    for save_json in saves:
+    for save_str in saves:
         try:
-            save_data = json.loads(save_json.strip())
-            section = save_data.get("section", "Conversation Memory")
-            content = save_data.get("content", "")
-            section_header = f"## {section}"
+            # Parse "section:X|content:Y" format
+            parts = {}
+            for part in save_str.strip().split("|"):
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    parts[k.strip()] = v.strip()
+            section = parts.get("section", "Conversation Memory")
+            content = parts.get("content", "")
+            if not content:
+                continue
+            section_header = "## " + section
+            marker = "*(auto-updated by bot)*"
             if section_header in new_brain:
-                # Find the marker and append before next section
-                marker = "*(auto-updated by bot)*"
-                insert_text = f"\n{content}"
                 new_brain = new_brain.replace(
-                    f"{section_header}\n{marker}",
-                    f"{section_header}\n{marker}{insert_text}"
+                    section_header + "\n" + marker,
+                    section_header + "\n" + marker + "\n" + content
                 )
         except:
             pass
