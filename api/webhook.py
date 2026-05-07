@@ -1,8 +1,9 @@
 from http.server import BaseHTTPRequestHandler
-import json, os, urllib.request, urllib.error
+import json, os, urllib.request, urllib.error, tempfile
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 SYSTEM_PROMPT = """You are a personal AI assistant for Vl (the owner of BananaSplit and CoNest Group).
 You communicate in whatever language the user writes in — Russian, English, or mixed.
@@ -27,39 +28,68 @@ You are a knowledgeable, direct, and action-oriented assistant. You know the use
 - Uses closing statements to track profit/loss per deal
 - Dashboard at conest-dashboard (on Vercel + GitHub)
 
-## Your capabilities
-- Answer questions about BananaSplit operations, strategy, partners
-- Help analyze real estate deals
-- Help draft emails, messages, SOPs
-- General AI assistant for any task
-- You have knowledge of the user's brain/notes from Basic Memory
-
 ## Communication style
 - Be direct and concise
-- Use bullet points for lists
 - Respond in the same language the user writes in
 - No corporate fluff — get to the point
 - You can be informal/casual in Russian"""
 
-# Keep conversation history per chat (simple in-memory, resets on cold start)
 conversations = {}
 
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # Split long messages
     if len(text) > 4000:
         text = text[:3997] + "..."
     data = json.dumps({"chat_id": chat_id, "text": text}).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     urllib.request.urlopen(req, timeout=10)
 
+def get_file_url(file_id):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+    req = urllib.request.Request(url)
+    resp = urllib.request.urlopen(req, timeout=10)
+    result = json.loads(resp.read())
+    file_path = result["result"]["file_path"]
+    return f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+
+def transcribe_voice(file_id):
+    # Download voice file from Telegram
+    file_url = get_file_url(file_id)
+    req = urllib.request.Request(file_url)
+    resp = urllib.request.urlopen(req, timeout=15)
+    audio_data = resp.read()
+    
+    # Send to OpenAI Whisper
+    boundary = "----FormBoundary7MA4YWxkTrZu0gW"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="voice.ogg"\r\n'
+        f'Content-Type: audio/ogg\r\n'
+        f"\r\n"
+    ).encode() + audio_data + (
+        f"\r\n--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n'
+        f"\r\n"
+        f"whisper-1\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/audio/transcriptions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {OPENAI_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}"
+        }
+    )
+    resp = urllib.request.urlopen(req, timeout=30)
+    result = json.loads(resp.read())
+    return result.get("text", "")
+
 def ask_claude(chat_id, user_message):
     if chat_id not in conversations:
         conversations[chat_id] = []
-    
     conversations[chat_id].append({"role": "user", "content": user_message})
-    
-    # Keep last 10 messages to avoid token overflow
     history = conversations[chat_id][-10:]
     
     url = "https://api.anthropic.com/v1/messages"
@@ -78,7 +108,6 @@ def ask_claude(chat_id, user_message):
     resp = urllib.request.urlopen(req, timeout=25)
     result = json.loads(resp.read())
     reply = result["content"][0]["text"]
-    
     conversations[chat_id].append({"role": "assistant", "content": reply})
     return reply
 
@@ -92,9 +121,10 @@ class handler(BaseHTTPRequestHandler):
             chat_id = message.get("chat", {}).get("id")
             text = message.get("text", "")
             voice = message.get("voice") or message.get("audio")
+            
             if chat_id and text:
                 if text == "/start":
-                    reply = "Привет! Я твой личный AI ассистент. Знаю всё о BananaSplit, CoNest и твоих делах. Спрашивай!"
+                    reply = "Привет! Я твой личный AI ассистент. Знаю всё о BananaSplit и CoNest. Пиши или отправляй голосовые!"
                 elif text == "/clear":
                     if chat_id in conversations:
                         del conversations[chat_id]
@@ -102,13 +132,23 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     reply = ask_claude(chat_id, text)
                 send_message(chat_id, reply)
+                
             elif chat_id and voice:
-                send_message(chat_id, "🎤 Голосовые сообщения пока не поддерживаются. Напиши текстом!")
+                file_id = voice["file_id"]
+                send_message(chat_id, "🎤 Транскрибирую...")
+                transcript = transcribe_voice(file_id)
+                if transcript:
+                    send_message(chat_id, f"🎤 _{transcript}_")
+                    reply = ask_claude(chat_id, transcript)
+                    send_message(chat_id, reply)
+                else:
+                    send_message(chat_id, "Не удалось распознать голос. Попробуй ещё раз.")
+                    
         except urllib.error.HTTPError as e:
             err = e.read().decode()
             print(f"HTTP Error: {e.code} - {err}")
             if chat_id:
-                try: send_message(chat_id, f"Ошибка API {e.code}: {err[:150]}")
+                try: send_message(chat_id, f"Ошибка: {err[:150]}")
                 except: pass
         except Exception as e:
             print(f"Error: {type(e).__name__}: {e}")
