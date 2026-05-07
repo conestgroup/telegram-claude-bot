@@ -13,7 +13,7 @@ def send_message(chat_id, text):
 def ask_claude(user_message):
     url = "https://api.anthropic.com/v1/messages"
     payload = {
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-3-haiku-20240307",
         "max_tokens": 512,
         "messages": [{"role": "user", "content": user_message}]
     }
