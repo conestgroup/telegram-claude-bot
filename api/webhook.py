@@ -91,6 +91,7 @@ class handler(BaseHTTPRequestHandler):
             message = body.get("message", {})
             chat_id = message.get("chat", {}).get("id")
             text = message.get("text", "")
+            voice = message.get("voice") or message.get("audio")
             if chat_id and text:
                 if text == "/start":
                     reply = "Привет! Я твой личный AI ассистент. Знаю всё о BananaSplit, CoNest и твоих делах. Спрашивай!"
@@ -101,6 +102,8 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     reply = ask_claude(chat_id, text)
                 send_message(chat_id, reply)
+            elif chat_id and voice:
+                send_message(chat_id, "🎤 Голосовые сообщения пока не поддерживаются. Напиши текстом!")
         except urllib.error.HTTPError as e:
             err = e.read().decode()
             print(f"HTTP Error: {e.code} - {err}")
