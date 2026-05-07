@@ -13,7 +13,7 @@ def send_message(chat_id, text):
 def ask_claude(user_message):
     url = "https://api.anthropic.com/v1/messages"
     payload = {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-3-5-haiku-20241022",
         "max_tokens": 512,
         "messages": [{"role": "user", "content": user_message}]
     }
@@ -62,7 +62,7 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         key_status = "SET" if ANTHROPIC_KEY else "MISSING"
         token_status = "SET" if TELEGRAM_TOKEN else "MISSING"
-        self.wfile.write(f"Bot running! ANTHROPIC_KEY:{key_status} TELEGRAM_TOKEN:{token_status}".encode())
+        self.wfile.write(f"Bot OK! KEY:{key_status} TOKEN:{token_status}".encode())
 
     def log_message(self, format, *args):
         pass
