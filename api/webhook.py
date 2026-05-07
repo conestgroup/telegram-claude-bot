@@ -1,40 +1,46 @@
 from http.server import BaseHTTPRequestHandler
-import json, os, urllib.request, urllib.error, tempfile
+import json, os, urllib.request, urllib.error, base64, re
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+BRAIN_REPO = "conestgroup/bot-brain"
+BRAIN_FILE = "brain.md"
 
-SYSTEM_PROMPT = """You are a personal AI assistant for Vl (the owner of BananaSplit and CoNest Group).
-You communicate in whatever language the user writes in — Russian, English, or mixed.
+def read_brain():
+    try:
+        url = f"https://api.github.com/repos/{BRAIN_REPO}/contents/{BRAIN_FILE}"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        })
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+        content = base64.b64decode(data["content"]).decode()
+        sha = data["sha"]
+        return content, sha
+    except:
+        return "", ""
 
-## Who you are
-You are a knowledgeable, direct, and action-oriented assistant. You know the user's businesses deeply:
-
-### BananaSplit
-- Sober living housing company in Phoenix, AZ
-- Currently 20 active homes, target 100 homes by end of 2026
-- Business model: manage sober living homes for investors, charge residents ~$260/week
-- Management fee: 22% of revenue (~$148K/month at 100 homes)
-- Members: ~250-300 (April 2026), paid via Kajabi platform
-- Referral partners: treatment centers, courts, probation officers
-- Key partner: Mercy Center Arizona
-- Tech stack: Kajabi, Mercury bank, TTLock smart locks, NVR cameras
-- Vision: 1,000 homes in Phoenix, then national expansion
-
-### CoNest Group
-- Real estate investment company
-- Buys and flips properties
-- Uses closing statements to track profit/loss per deal
-- Dashboard at conest-dashboard (on Vercel + GitHub)
-
-## Communication style
-- Be direct and concise
-- Respond in the same language the user writes in
-- No corporate fluff — get to the point
-- You can be informal/casual in Russian"""
-
-conversations = {}
+def write_brain(new_content, sha):
+    try:
+        url = f"https://api.github.com/repos/{BRAIN_REPO}/contents/{BRAIN_FILE}"
+        encoded = base64.b64encode(new_content.encode()).decode()
+        payload = json.dumps({
+            "message": "Bot brain update",
+            "content": encoded,
+            "sha": sha
+        }).encode()
+        req = urllib.request.Request(url, data=payload, method="PUT", headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github.v3+json"
+        })
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except:
+        return False
 
 def send_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -53,13 +59,10 @@ def get_file_url(file_id):
     return f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
 
 def transcribe_voice(file_id):
-    # Download voice file from Telegram
     file_url = get_file_url(file_id)
     req = urllib.request.Request(file_url)
     resp = urllib.request.urlopen(req, timeout=15)
     audio_data = resp.read()
-    
-    # Send to OpenAI Whisper
     boundary = "----FormBoundary7MA4YWxkTrZu0gW"
     body = (
         f"--{boundary}\r\n"
@@ -73,7 +76,6 @@ def transcribe_voice(file_id):
         f"whisper-1\r\n"
         f"--{boundary}--\r\n"
     ).encode()
-    
     req = urllib.request.Request(
         "https://api.openai.com/v1/audio/transcriptions",
         data=body,
@@ -86,17 +88,32 @@ def transcribe_voice(file_id):
     result = json.loads(resp.read())
     return result.get("text", "")
 
-def ask_claude(chat_id, user_message):
+def ask_claude(chat_id, user_message, brain_content, conversations):
+    system = f"""You are a personal AI assistant for Vl (owner of BananaSplit and CoNest Group).
+Respond in the same language the user writes in. Be direct and concise.
+
+## Your Memory (Brain)
+{brain_content}
+
+## Instructions
+- Use the brain content to give personalized answers
+- If the user says "remember X" or "запомни X" — confirm you will save it
+- If the user shares important info, decisions, or tasks — note them
+- After responding, if something important was said, add a JSON block at the very end:
+  <SAVE>{"section": "Tasks & Follow-ups", "content": "- Task description"}</SAVE>
+  Valid sections: "Important Decisions", "Tasks & Follow-ups", "Conversation Memory"
+"""
+
     if chat_id not in conversations:
         conversations[chat_id] = []
     conversations[chat_id].append({"role": "user", "content": user_message})
     history = conversations[chat_id][-10:]
-    
+
     url = "https://api.anthropic.com/v1/messages"
     payload = {
         "model": "claude-haiku-4-5",
         "max_tokens": 1024,
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "messages": history
     }
     data = json.dumps(payload).encode()
@@ -111,6 +128,42 @@ def ask_claude(chat_id, user_message):
     conversations[chat_id].append({"role": "assistant", "content": reply})
     return reply
 
+def process_save(reply, brain_content, brain_sha):
+    """Extract SAVE blocks and update brain"""
+    saves = re.findall(r'<SAVE>(.*?)</SAVE>', reply, re.DOTALL)
+    if not saves:
+        return reply, brain_content, brain_sha
+    
+    clean_reply = re.sub(r'<SAVE>.*?</SAVE>', '', reply, flags=re.DOTALL).strip()
+    
+    new_brain = brain_content
+    for save_json in saves:
+        try:
+            save_data = json.loads(save_json.strip())
+            section = save_data.get("section", "Conversation Memory")
+            content = save_data.get("content", "")
+            section_header = f"## {section}"
+            if section_header in new_brain:
+                # Find the marker and append before next section
+                marker = "*(auto-updated by bot)*"
+                insert_text = f"\n{content}"
+                new_brain = new_brain.replace(
+                    f"{section_header}\n{marker}",
+                    f"{section_header}\n{marker}{insert_text}"
+                )
+        except:
+            pass
+    
+    if new_brain != brain_content:
+        success = write_brain(new_brain, brain_sha)
+        if success:
+            return clean_reply + "\n\n💾 _Сохранено в память_", new_brain, brain_sha
+    
+    return clean_reply, brain_content, brain_sha
+
+conversations = {}
+brain_cache = {"content": "", "sha": "", "loaded": False}
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         chat_id = None
@@ -121,29 +174,44 @@ class handler(BaseHTTPRequestHandler):
             chat_id = message.get("chat", {}).get("id")
             text = message.get("text", "")
             voice = message.get("voice") or message.get("audio")
-            
+
+            # Load brain
+            if not brain_cache["loaded"]:
+                brain_cache["content"], brain_cache["sha"] = read_brain()
+                brain_cache["loaded"] = True
+
             if chat_id and text:
                 if text == "/start":
-                    reply = "Привет! Я твой личный AI ассистент. Знаю всё о BananaSplit и CoNest. Пиши или отправляй голосовые!"
+                    send_message(chat_id, "Привет! Я твой личный AI ассистент с памятью. Знаю всё о BananaSplit и CoNest. Пиши или отправляй голосовые!")
                 elif text == "/clear":
                     if chat_id in conversations:
                         del conversations[chat_id]
-                    reply = "История очищена."
+                    send_message(chat_id, "История очищена.")
+                elif text == "/brain":
+                    brain_cache["content"], brain_cache["sha"] = read_brain()
+                    brain_cache["loaded"] = True
+                    send_message(chat_id, f"🧠 Текущий брейн:\n\n{brain_cache['content'][:2000]}")
                 else:
-                    reply = ask_claude(chat_id, text)
-                send_message(chat_id, reply)
-                
+                    reply = ask_claude(chat_id, text, brain_cache["content"], conversations)
+                    reply, brain_cache["content"], brain_cache["sha"] = process_save(
+                        reply, brain_cache["content"], brain_cache["sha"]
+                    )
+                    send_message(chat_id, reply)
+
             elif chat_id and voice:
                 file_id = voice["file_id"]
                 send_message(chat_id, "🎤 Транскрибирую...")
                 transcript = transcribe_voice(file_id)
                 if transcript:
                     send_message(chat_id, f"🎤 _{transcript}_")
-                    reply = ask_claude(chat_id, transcript)
+                    reply = ask_claude(chat_id, transcript, brain_cache["content"], conversations)
+                    reply, brain_cache["content"], brain_cache["sha"] = process_save(
+                        reply, brain_cache["content"], brain_cache["sha"]
+                    )
                     send_message(chat_id, reply)
                 else:
-                    send_message(chat_id, "Не удалось распознать голос. Попробуй ещё раз.")
-                    
+                    send_message(chat_id, "Не удалось распознать. Попробуй ещё раз.")
+
         except urllib.error.HTTPError as e:
             err = e.read().decode()
             print(f"HTTP Error: {e.code} - {err}")
@@ -155,6 +223,7 @@ class handler(BaseHTTPRequestHandler):
             if chat_id:
                 try: send_message(chat_id, f"Ошибка: {str(e)[:150]}")
                 except: pass
+
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
